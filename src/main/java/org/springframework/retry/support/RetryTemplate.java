@@ -95,7 +95,10 @@ public class RetryTemplate implements RetryOperations {
 
 	private volatile RetryListener[] listeners = new RetryListener[0];
 
-	private RetryContextCache retryContextCache = new MapRetryContextCache();
+	private RetryContextCache retryContextCache = new MapRetryContextCache(MapRetryContextCache.DEFAULT_CAPACITY, true);
+
+	private RetryContextCache circuitBreakerRetryContextCache = new MapRetryContextCache(
+			MapRetryContextCache.DEFAULT_CAPACITY, false);
 
 	private boolean throwLastExceptionOnExhausted;
 
@@ -137,6 +140,15 @@ public class RetryTemplate implements RetryOperations {
 	 */
 	public void setRetryContextCache(RetryContextCache retryContextCache) {
 		this.retryContextCache = retryContextCache;
+	}
+
+	/**
+	 * Set the {@link RetryContextCache} to use for stateful retries that are used by
+	 * circuit breakers.
+	 * @param circuitBreakerRetryContextCache the {@link RetryContextCache} to use
+	 */
+	public void setCircuitBreakerRetryContextCache(RetryContextCache circuitBreakerRetryContextCache) {
+		this.circuitBreakerRetryContextCache = circuitBreakerRetryContextCache;
 	}
 
 	/**
@@ -439,9 +451,7 @@ public class RetryTemplate implements RetryOperations {
 	protected void close(RetryPolicy retryPolicy, RetryContext context, RetryState state, boolean succeeded) {
 		if (state != null) {
 			if (succeeded) {
-				if (!context.hasAttribute(GLOBAL_STATE)) {
-					this.retryContextCache.remove(state.getKey());
-				}
+				removeCachedContext(state.getKey(), context);
 				retryPolicy.close(context);
 				context.setAttribute(RetryContext.CLOSED, true);
 			}
@@ -461,12 +471,12 @@ public class RetryTemplate implements RetryOperations {
 		if (state != null) {
 			Object key = state.getKey();
 			if (key != null) {
-				if (context.getRetryCount() > 1 && !this.retryContextCache.containsKey(key)) {
+				if (context.getRetryCount() > 1 && !containsCachedContext(key, context)) {
 					throw new RetryException("Inconsistent state for failed item key: cache key has changed. "
 							+ "Consider whether equals() or hashCode() for the key might be inconsistent, "
 							+ "or if you need to supply a better key");
 				}
-				this.retryContextCache.put(key, context);
+				putCachedContext(key, context);
 			}
 		}
 	}
@@ -492,14 +502,14 @@ public class RetryTemplate implements RetryOperations {
 
 		// If there is no cache hit we can avoid the possible expense of the
 		// cache re-hydration.
-		if (!this.retryContextCache.containsKey(key)) {
+		if (!containsCachedContext(key)) {
 			// The cache is only used if there is a failure.
 			return doOpenInternal(retryPolicy, state);
 		}
 
-		RetryContext context = this.retryContextCache.get(key);
+		RetryContext context = getCachedContext(key);
 		if (context == null) {
-			if (this.retryContextCache.containsKey(key)) {
+			if (containsCachedContext(key)) {
 				throw new RetryException("Inconsistent state for failed item: no history found. "
 						+ "Consider whether equals() or hashCode() for the item might be inconsistent, "
 						+ "or if you need to supply a better ItemKeyGenerator");
@@ -550,8 +560,8 @@ public class RetryTemplate implements RetryOperations {
 	protected <T> T handleRetryExhausted(RecoveryCallback<T> recoveryCallback, RetryContext context, RetryState state)
 			throws Throwable {
 		context.setAttribute(RetryContext.EXHAUSTED, true);
-		if (state != null && !context.hasAttribute(GLOBAL_STATE)) {
-			this.retryContextCache.remove(state.getKey());
+		if (state != null) {
+			removeCachedContext(state.getKey(), context);
 		}
 		boolean doRecover = !Boolean.TRUE.equals(context.getAttribute(RetryContext.NO_RECOVERY));
 		if (recoveryCallback != null) {
@@ -649,6 +659,52 @@ public class RetryTemplate implements RetryOperations {
 		}
 		else {
 			throw new RetryException("Exception in retry", throwable);
+		}
+	}
+
+	/**
+	 * Look up a cached context, checking the stateful retry cache first and then the
+	 * circuit breaker cache.
+	 */
+	private RetryContext getCachedContext(Object key) {
+		RetryContext retryContext = this.retryContextCache.get(key);
+		return (retryContext != null) ? retryContext : this.circuitBreakerRetryContextCache.get(key);
+	}
+
+	/**
+	 * Store the context in the cache that matches its nature: global state (circuit
+	 * breakers) goes to the circuit breaker cache, everything else to the stateful retry
+	 * cache.
+	 */
+	private void putCachedContext(Object key, RetryContext context) {
+		if (context.hasAttribute(GLOBAL_STATE)) {
+			this.circuitBreakerRetryContextCache.put(key, context);
+		}
+		else {
+			this.retryContextCache.put(key, context);
+		}
+	}
+
+	/**
+	 * Remove the context from the stateful retry cache. Global state (circuit breakers)
+	 * is never removed.
+	 */
+	private void removeCachedContext(Object key, RetryContext context) {
+		if (!context.hasAttribute(GLOBAL_STATE)) {
+			this.retryContextCache.remove(key);
+		}
+	}
+
+	private boolean containsCachedContext(Object key) {
+		return this.retryContextCache.containsKey(key) || this.circuitBreakerRetryContextCache.containsKey(key);
+	}
+
+	private boolean containsCachedContext(Object key, RetryContext context) {
+		if (context.hasAttribute(GLOBAL_STATE)) {
+			return this.circuitBreakerRetryContextCache.containsKey(key);
+		}
+		else {
+			return this.retryContextCache.containsKey(key);
 		}
 	}
 

@@ -18,14 +18,21 @@ package org.springframework.retry.policy;
 import java.lang.ref.SoftReference;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.springframework.retry.RetryContext;
 
 /**
  * Map-based implementation of {@link RetryContextCache}. The map backing the cache of
  * contexts is synchronized and its entries are soft-referenced, so may be garbage
- * collected under pressure.
+ * collected under pressure. The cache has a configurable maximum capacity: by default
+ * the least recently used entries are evicted when the cache is full. For a cache used
+ * in a global state (e.g. circuit breakers), the cache can instead be configured to
+ * reject new entries once it is full.
  *
  * @see MapRetryContextCache for non-soft referenced version
  * @author Dave Syer
@@ -39,7 +46,11 @@ public class SoftReferenceMapRetryContextCache implements RetryContextCache {
 	 */
 	public static final int DEFAULT_CAPACITY = 4096;
 
-	private final Map<Object, SoftReference<RetryContext>> map = Collections.synchronizedMap(new HashMap<>());
+	private static final Log logger = LogFactory.getLog(SoftReferenceMapRetryContextCache.class);
+
+	private final Map<Object, SoftReference<RetryContext>> map;
+
+	private final boolean failIfFull;
 
 	private int capacity;
 
@@ -51,11 +62,39 @@ public class SoftReferenceMapRetryContextCache implements RetryContextCache {
 	}
 
 	/**
+	 * Create a {@link SoftReferenceMapRetryContextCache} with the given capacity,
+	 * removing the eldest entries when the cache is full.
 	 * @param defaultCapacity the default capacity
 	 */
 	public SoftReferenceMapRetryContextCache(int defaultCapacity) {
+		this(defaultCapacity, true);
+	}
+
+	/**
+	 * Create a {@link SoftReferenceMapRetryContextCache} with the given capacity and the
+	 * policy to apply when the cache is full.
+	 * @param capacity the size of the cache
+	 * @param removeEldestEntries whether to remove the eldest entries when the cache is
+	 * full (otherwise a {@link RetryCacheCapacityExceededException} is thrown when
+	 * adding a new entry to a full cache)
+	 */
+	public SoftReferenceMapRetryContextCache(int capacity, boolean removeEldestEntries) {
 		super();
-		this.capacity = defaultCapacity;
+		this.capacity = capacity;
+		this.map = Collections.synchronizedMap(removeEldestEntries
+				? new LinkedHashMap<Object, SoftReference<RetryContext>>(capacity, 0.75f, true) {
+					@Override
+					protected boolean removeEldestEntry(Map.Entry<Object, SoftReference<RetryContext>> eldest) {
+						boolean evict = size() > SoftReferenceMapRetryContextCache.this.capacity;
+						if (evict && logger.isWarnEnabled()) {
+							logger.warn("Retry cache capacity limit breached. "
+									+ "Do you need to re-consider the implementation of the key generator, "
+									+ "or the equals and hashCode of the items that failed?");
+						}
+						return evict;
+					}
+				} : new HashMap<>());
+		this.failIfFull = !removeEldestEntries;
 	}
 
 	/**
@@ -81,11 +120,12 @@ public class SoftReferenceMapRetryContextCache implements RetryContextCache {
 	}
 
 	public RetryContext get(Object key) {
-		return map.get(key).get();
+		SoftReference<RetryContext> ref = map.get(key);
+		return (ref != null) ? ref.get() : null;
 	}
 
 	public void put(Object key, RetryContext context) {
-		if (map.size() >= capacity) {
+		if (this.failIfFull && !map.containsKey(key) && map.size() >= capacity) {
 			throw new RetryCacheCapacityExceededException("Retry cache capacity limit breached. "
 					+ "Do you need to re-consider the implementation of the key generator, "
 					+ "or the equals and hashCode of the items that failed?");

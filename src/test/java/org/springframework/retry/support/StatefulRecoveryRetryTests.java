@@ -31,6 +31,7 @@ import org.springframework.retry.RetryContext;
 import org.springframework.retry.RetryException;
 import org.springframework.retry.RetryPolicy;
 import org.springframework.retry.RetryState;
+import org.springframework.retry.policy.CircuitBreakerRetryPolicy;
 import org.springframework.retry.policy.MapRetryContextCache;
 import org.springframework.retry.policy.NeverRetryPolicy;
 import org.springframework.retry.policy.SimpleRetryPolicy;
@@ -181,8 +182,9 @@ public class StatefulRecoveryRetryTests {
 	@Test
 	public void testCacheCapacity() throws Throwable {
 
+		MapRetryContextCache cache = new MapRetryContextCache(1);
 		this.retryTemplate.setRetryPolicy(new SimpleRetryPolicy(1));
-		this.retryTemplate.setRetryContextCache(new MapRetryContextCache(1));
+		this.retryTemplate.setRetryContextCache(cache);
 
 		RetryCallback<Object, Exception> callback = context -> {
 			StatefulRecoveryRetryTests.this.count++;
@@ -193,9 +195,75 @@ public class StatefulRecoveryRetryTests {
 			.isThrownBy(() -> this.retryTemplate.execute(callback, new DefaultRetryState("foo")))
 			.withMessage("Barf!");
 
-		assertThatExceptionOfType(RetryException.class)
+		assertThatExceptionOfType(RuntimeException.class)
 			.isThrownBy(() -> this.retryTemplate.execute(callback, new DefaultRetryState("bar")))
-			.withStackTraceContaining("capacity");
+			.withMessage("Barf!");
+
+		assertThat(cache.containsKey("bar")).isTrue();
+		assertThat(cache.containsKey("foo")).isFalse();
+	}
+
+	@Test
+	public void testDefaultCacheNotExhaustedByDistinctFailingItems() throws Throwable {
+
+		this.retryTemplate.setRetryPolicy(new SimpleRetryPolicy(2));
+
+		RetryCallback<Object, Exception> callback = context -> {
+			StatefulRecoveryRetryTests.this.count++;
+			throw new RuntimeException("Barf!");
+		};
+
+		// Leak more failed items than the default capacity of the cache: none of them is
+		// ever retried, so their contexts are never removed from the cache
+		for (int i = 0; i <= MapRetryContextCache.DEFAULT_CAPACITY; i++) {
+			String key = "item-" + i;
+			assertThatExceptionOfType(RuntimeException.class)
+				.isThrownBy(() -> this.retryTemplate.execute(callback, new DefaultRetryState(key)))
+				.withMessage("Barf!");
+		}
+
+		// A legitimate item can still be retried
+		assertThatExceptionOfType(RuntimeException.class)
+			.isThrownBy(() -> this.retryTemplate.execute(callback, new DefaultRetryState("legitimate")))
+			.withMessage("Barf!");
+		RetryContext context = this.retryTemplate.open(new SimpleRetryPolicy(2), new DefaultRetryState("legitimate"));
+		assertThat(context.getRetryCount()).isEqualTo(1);
+	}
+
+	@Test
+	public void testStatefulRetriesDoNotEvictCircuitBreakerState() throws Throwable {
+
+		this.retryTemplate.setRetryContextCache(new MapRetryContextCache(1));
+		CircuitBreakerRetryPolicy circuitBreakerPolicy = new CircuitBreakerRetryPolicy(new NeverRetryPolicy());
+		RetryState circuitState = new DefaultRetryState("circuit", new BinaryExceptionClassifier(false));
+		RecoveryCallback<Object> recoveryCallback = context -> "RECOVERED";
+
+		RetryCallback<Object, Exception> callback = context -> {
+			StatefulRecoveryRetryTests.this.count++;
+			throw new RuntimeException("Barf!");
+		};
+
+		// Open the circuit
+		this.retryTemplate.setRetryPolicy(circuitBreakerPolicy);
+		assertThat(this.retryTemplate.execute(callback, recoveryCallback, circuitState)).isEqualTo("RECOVERED");
+		assertThat(this.count).isEqualTo(1);
+		assertThat(this.retryTemplate.execute(callback, recoveryCallback, circuitState)).isEqualTo("RECOVERED");
+		assertThat(this.count).isEqualTo(1);
+
+		// Flood the stateful retry cache with distinct, never recovered, failing items
+		this.retryTemplate.setRetryPolicy(new SimpleRetryPolicy(2));
+		for (int i = 0; i < 10; i++) {
+			String key = "item-" + i;
+			assertThatExceptionOfType(RuntimeException.class)
+				.isThrownBy(() -> this.retryTemplate.execute(callback, new DefaultRetryState(key)))
+				.withMessage("Barf!");
+		}
+		assertThat(this.count).isEqualTo(11);
+
+		// The circuit is still open: the global state was neither rejected nor evicted
+		this.retryTemplate.setRetryPolicy(circuitBreakerPolicy);
+		assertThat(this.retryTemplate.execute(callback, recoveryCallback, circuitState)).isEqualTo("RECOVERED");
+		assertThat(this.count).isEqualTo(11);
 	}
 
 	@Test

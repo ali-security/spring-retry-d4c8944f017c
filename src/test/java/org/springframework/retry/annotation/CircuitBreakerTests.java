@@ -31,7 +31,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.retry.ExhaustedRetryException;
 import org.springframework.retry.RetryContext;
+import org.springframework.retry.backoff.Sleeper;
 import org.springframework.retry.policy.CircuitBreakerRetryPolicy;
+import org.springframework.retry.policy.MapRetryContextCache;
+import org.springframework.retry.policy.RetryContextCache;
 import org.springframework.retry.support.RetrySynchronizationManager;
 import org.springframework.retry.util.test.TestUtils;
 
@@ -123,6 +126,87 @@ public class CircuitBreakerTests {
 			.withMessage("Planned");
 
 		context.close();
+	}
+
+	@Test
+	public void circuitBreakerStateSurvivesStatefulRetryCacheFlood() {
+		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(
+				CacheFloodConfiguration.class);
+		try {
+			FloodService service = context.getBean(FloodService.class);
+			// Open the circuit
+			for (int i = 0; i < 3; i++) {
+				assertThatExceptionOfType(RuntimeException.class).isThrownBy(service::circuit);
+			}
+			assertThat(service.getCircuitCount()).isEqualTo(3);
+			assertThatExceptionOfType(RuntimeException.class).isThrownBy(service::circuit);
+			assertThat(service.getCircuitCount()).isEqualTo(3);
+
+			// Flood the stateful retry cache with distinct, never recovered, failing items
+			for (int i = 0; i < 10; i++) {
+				String item = "item-" + i;
+				assertThatExceptionOfType(RuntimeException.class).isThrownBy(() -> service.stateful(item))
+					.withMessage("Planned");
+			}
+			assertThat(service.getStatefulCount()).isEqualTo(10);
+
+			// The circuit is still open: the target is not invoked
+			assertThatExceptionOfType(RuntimeException.class).isThrownBy(service::circuit);
+			assertThat(service.getCircuitCount()).isEqualTo(3);
+		}
+		finally {
+			context.close();
+		}
+	}
+
+	@Configuration
+	@EnableRetry
+	protected static class CacheFloodConfiguration {
+
+		@Bean
+		RetryContextCache retryContextCache() {
+			return new MapRetryContextCache(1);
+		}
+
+		@Bean
+		Sleeper sleeper() {
+			return backOffPeriod -> {
+			};
+		}
+
+		@Bean
+		FloodService floodService() {
+			return new FloodService();
+		}
+
+	}
+
+	protected static class FloodService {
+
+		private int circuitCount;
+
+		private int statefulCount;
+
+		@CircuitBreaker(retryFor = RuntimeException.class)
+		public void circuit() {
+			this.circuitCount++;
+			throw new RuntimeException("Planned");
+		}
+
+		@Retryable(stateful = true)
+		public void stateful(String item) {
+			this.statefulCount++;
+			throw new RuntimeException("Planned");
+		}
+
+		public int getCircuitCount() {
+			return this.circuitCount;
+		}
+
+		public int getStatefulCount() {
+			return this.statefulCount;
+		}
+
 	}
 
 	@Configuration

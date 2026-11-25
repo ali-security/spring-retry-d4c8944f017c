@@ -17,13 +17,20 @@ package org.springframework.retry.policy;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.springframework.retry.RetryContext;
 
 /**
  * Map-based implementation of {@link RetryContextCache}. The map backing the cache of
- * contexts is synchronized.
+ * contexts is synchronized. The cache has a configurable maximum capacity: by default
+ * the least recently used entries are evicted when the cache is full. For a cache used
+ * in a global state (e.g. circuit breakers), the cache can instead be configured to
+ * reject new entries once it is full.
  *
  * @author Dave Syer
  */
@@ -36,7 +43,11 @@ public class MapRetryContextCache implements RetryContextCache {
 	 */
 	public static final int DEFAULT_CAPACITY = 4096;
 
-	private final Map<Object, RetryContext> map = Collections.synchronizedMap(new HashMap<>());
+	private static final Log logger = LogFactory.getLog(MapRetryContextCache.class);
+
+	private final Map<Object, RetryContext> map;
+
+	private final boolean failIfFull;
 
 	private int capacity;
 
@@ -48,11 +59,39 @@ public class MapRetryContextCache implements RetryContextCache {
 	}
 
 	/**
+	 * Create a {@link MapRetryContextCache} with the given capacity, removing the eldest
+	 * entries when the cache is full.
 	 * @param defaultCapacity the default capacity
 	 */
 	public MapRetryContextCache(int defaultCapacity) {
+		this(defaultCapacity, true);
+	}
+
+	/**
+	 * Create a {@link MapRetryContextCache} with the given capacity and the policy to
+	 * apply when the cache is full.
+	 * @param capacity the size of the cache
+	 * @param removeEldestEntries whether to remove the eldest entries when the cache is
+	 * full (otherwise a {@link RetryCacheCapacityExceededException} is thrown when
+	 * adding a new entry to a full cache)
+	 */
+	public MapRetryContextCache(int capacity, boolean removeEldestEntries) {
 		super();
-		this.capacity = defaultCapacity;
+		this.capacity = capacity;
+		this.map = Collections
+			.synchronizedMap(removeEldestEntries ? new LinkedHashMap<Object, RetryContext>(capacity, 0.75f, true) {
+				@Override
+				protected boolean removeEldestEntry(Map.Entry<Object, RetryContext> eldest) {
+					boolean evict = size() > MapRetryContextCache.this.capacity;
+					if (evict && logger.isWarnEnabled()) {
+						logger.warn("Retry cache capacity limit breached. "
+								+ "Do you need to re-consider the implementation of the key generator, "
+								+ "or the equals and hashCode of the items that failed?");
+					}
+					return evict;
+				}
+			} : new HashMap<>());
+		this.failIfFull = !removeEldestEntries;
 	}
 
 	/**
@@ -75,7 +114,7 @@ public class MapRetryContextCache implements RetryContextCache {
 	}
 
 	public void put(Object key, RetryContext context) {
-		if (map.size() >= capacity) {
+		if (this.failIfFull && !map.containsKey(key) && map.size() >= capacity) {
 			throw new RetryCacheCapacityExceededException("Retry cache capacity limit breached. "
 					+ "Do you need to re-consider the implementation of the key generator, "
 					+ "or the equals and hashCode of the items that failed?");

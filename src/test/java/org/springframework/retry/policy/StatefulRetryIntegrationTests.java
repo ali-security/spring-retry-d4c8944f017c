@@ -189,4 +189,51 @@ public class StatefulRetryIntegrationTests {
 
 	}
 
+	static class SerializedMapRetryContextCache implements RetryContextCache {
+
+		private final java.util.Map<Object, byte[]> map = java.util.Collections
+			.synchronizedMap(new java.util.LinkedHashMap<Object, byte[]>(MapRetryContextCache.DEFAULT_CAPACITY, 0.75f,
+					true) {
+				@Override
+				protected boolean removeEldestEntry(java.util.Map.Entry<Object, byte[]> eldest) {
+					return size() > MapRetryContextCache.DEFAULT_CAPACITY;
+				}
+			});
+
+		@Override
+		public boolean containsKey(Object key) {
+			return this.map.containsKey(key);
+		}
+
+		@Override
+		public RetryContext get(Object key) {
+			byte[] value = this.map.get(key);
+			return (value != null) ? fromValue(value) : null;
+		}
+
+		@Override
+		public void put(Object key, RetryContext context) {
+			this.map.put(key, org.springframework.util.SerializationUtils.serialize(context));
+		}
+
+		@Override
+		public void remove(Object key) {
+			this.map.remove(key);
+		}
+
+		private RetryContext fromValue(byte[] value) {
+			try (java.io.ObjectInputStream ois = new java.io.ObjectInputStream(
+					new java.io.ByteArrayInputStream(value))) {
+				return (RetryContext) ois.readObject();
+			}
+			catch (java.io.IOException ex) {
+				throw new IllegalArgumentException("Failed to deserialize object", ex);
+			}
+			catch (ClassNotFoundException ex) {
+				throw new IllegalStateException("Failed to deserialize object type", ex);
+			}
+		}
+
+	}
+
 }

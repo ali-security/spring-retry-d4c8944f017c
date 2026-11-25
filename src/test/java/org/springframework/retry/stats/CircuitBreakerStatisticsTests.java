@@ -68,7 +68,7 @@ public class CircuitBreakerStatisticsTests {
 		this.recovery = context -> RECOVERED;
 		this.retryTemplate = new RetryTemplate();
 		this.cache = new MapRetryContextCache();
-		this.retryTemplate.setRetryContextCache(this.cache);
+		this.retryTemplate.setCircuitBreakerRetryContextCache(this.cache);
 		retryTemplate.setListeners(new RetryListener[] { listener });
 		this.callback.setAttemptsBeforeSuccess(1);
 		// No rollback by default (so exceptions are not rethrown)
