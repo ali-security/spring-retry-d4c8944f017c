@@ -1,8 +1,6 @@
 name: Release
 on:
-  push:
-    tags:
-      - v2.0.[0-9]+
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
 jobs:

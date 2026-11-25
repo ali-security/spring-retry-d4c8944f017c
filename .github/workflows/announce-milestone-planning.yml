@@ -1,8 +1,7 @@
 name: Announce Milestone Planning in Chat
 
 on:
-  milestone:
-    types: [ created, edited ]
+  workflow_dispatch:
 
 jobs:
   announce-milestone-planning:

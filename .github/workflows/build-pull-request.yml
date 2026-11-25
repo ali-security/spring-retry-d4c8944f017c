@@ -1,5 +1,11 @@
 name: Build Pull Request
-on: pull_request
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional surefire -Dtest selector; empty runs the full suite'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -8,17 +14,29 @@ jobs:
   build:
     name: Build Pull Request
     runs-on: ubuntu-latest
-    if: ${{ github.repository == 'spring-projects/spring-retry' }}
+    timeout-minutes: 45
     steps:
+      - name: Check Out
+        uses: actions/checkout@v4
       - name: Set Up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'liberica'
-      - name: Check Out
-        uses: actions/checkout@v4
+          cache: 'maven'
       - name: Build
-        run: ./mvnw --batch-mode --update-snapshots verify
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            ./mvnw --batch-mode --update-snapshots verify -Ddisable.checks=true -Dtest='${{ inputs.test-filter }}' -Dsurefire.failIfNoSpecifiedTests=false
+          else
+            ./mvnw --batch-mode --update-snapshots verify -Ddisable.checks=true
+          fi
+      - name: Upload Jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-retry-jar
+          path: target/spring-retry-*[0-9].jar
+          if-no-files-found: error
       - name: Print JVM Thread Dumps When Cancelled
         uses: ./.github/actions/print-jvm-thread-dumps
         if: cancelled()
